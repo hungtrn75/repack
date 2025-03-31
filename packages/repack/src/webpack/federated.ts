@@ -1,5 +1,5 @@
-import { URL } from 'url';
 import dedent from 'dedent';
+import { URL } from 'url';
 
 /**
  * Namespace for utilities for Module Federation.

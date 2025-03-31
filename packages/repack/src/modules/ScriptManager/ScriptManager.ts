@@ -1,11 +1,15 @@
 /* globals __DEV__, __webpack_require__ */
 import EventEmitter from 'events';
 import { getWebpackContext } from './getWebpackContext';
-import { Script } from './Script';
-import type { ScriptLocatorResolver, StorageApi } from './types';
 import NativeScriptManager, {
   NormalizedScriptLocator,
 } from './NativeScriptManager';
+import { Script } from './Script';
+import type {
+  ScriptLocatorResolver,
+  StorageApi,
+  WebpackContext,
+} from './types';
 
 type Cache = Record<
   string,
@@ -90,6 +94,14 @@ export class ScriptManager extends EventEmitter {
 
   protected cache: Cache = {};
   protected cacheInitialized = false;
+  /**
+   * @var memoCache dùng để lưu lại cờ của cache trước khi thực hiện {@link loadScript}
+   * nếu thực hiện tải bundle mới thất bại thì thực hiện behavior mặc định là
+   * -> Nếu trước đó có cache thì thực hiện load phiên bản trước đó lên
+   * -> Nếu không có cache thì thực hiện báo lỗi tải modules
+   */
+  protected memoCache: Cache = {};
+
   protected resolvers: [number, ScriptLocatorResolver][] = [];
   protected storage?: StorageApi;
 
@@ -122,6 +134,8 @@ export class ScriptManager extends EventEmitter {
     ) => {
       const [[scriptId, caller]] = data;
       this.emit('__loaded__', { scriptId, caller });
+      console.log('');
+
       return parentPush(...data);
     }).bind(
       null,
@@ -206,6 +220,7 @@ export class ScriptManager extends EventEmitter {
       const cacheEntry = await this.storage?.getItem(CACHE_KEY);
       this.cache = cacheEntry ? JSON.parse(cacheEntry) : {};
       this.cacheInitialized = true;
+      console.debug('initCache', JSON.stringify(this.cache));
     }
   }
 
@@ -240,6 +255,7 @@ export class ScriptManager extends EventEmitter {
     webpackContext = getWebpackContext()
   ): Promise<Script> {
     await this.initCache();
+    let cacheKey = undefined;
     try {
       if (!this.resolvers.length) {
         throw new Error(
@@ -266,7 +282,13 @@ export class ScriptManager extends EventEmitter {
       }
 
       const script = Script.from({ scriptId, caller }, locator, false);
-      const cacheKey = script.locator.uniqueId;
+      cacheKey = script.locator.uniqueId;
+
+      if (this.cache[cacheKey]) {
+        this.memoCache[cacheKey] = JSON.parse(
+          JSON.stringify(this.cache[cacheKey])
+        );
+      }
 
       // Check if user provided a custom shouldUpdateScript function
       if (locator.shouldUpdateScript) {
@@ -325,6 +347,8 @@ export class ScriptManager extends EventEmitter {
    *
    * @param scriptId Id of the script to load.
    * @param caller Name of the calling script - it can be for example: name of the bundle, chunk or container.
+   * @param retryFlag là cờ dùng để biết script có được load từ cache hay không
+   *
    */
   async loadScript(
     scriptId: string,
@@ -332,27 +356,41 @@ export class ScriptManager extends EventEmitter {
     webpackContext = getWebpackContext()
   ) {
     let script = await this.resolveScript(scriptId, caller, webpackContext);
-    return await new Promise<void>((resolve, reject) => {
+    return await new Promise<boolean>((resolve, reject) => {
       (async () => {
+        let retryFlag = false;
         const onLoaded = (data: { scriptId: string; caller?: string }) => {
           if (data.scriptId === scriptId && data.caller === caller) {
             this.emit('loaded', script.toObject());
-            resolve();
+            resolve(retryFlag);
           }
         };
 
         try {
           this.emit('loading', script.toObject());
           this.on('__loaded__', onLoaded);
+
           await this.nativeScriptManager.loadScript(scriptId, script.locator);
         } catch (error) {
-          const { code } = error as Error & { code: string };
-          this.handleError(
-            error,
-            '[ScriptManager] Failed to load script:',
-            code ? `[${code}]` : '',
-            script.toObject()
-          );
+          try {
+            retryFlag = true;
+            await this.rollbackCache(
+              webpackContext,
+              script.locator.uniqueId,
+              scriptId,
+              error,
+              caller
+            );
+          } catch (error) {
+            const { code } = error as Error & { code: string };
+
+            this.handleError(
+              error,
+              '[ScriptManager] Failed to load script:',
+              code ? `[${code}]` : '',
+              script.toObject()
+            );
+          }
         } finally {
           this.removeListener('__loaded__', onLoaded);
         }
@@ -360,6 +398,73 @@ export class ScriptManager extends EventEmitter {
         reject(error);
       });
     });
+  }
+
+  protected parseQueryString(queryString: string): Record<string, string> {
+    return queryString.split('&').reduce((acc, pair) => {
+      const [key, value] = pair.split('=');
+      return { ...acc, [key]: value };
+    }, {});
+  }
+
+  /**
+   * @function rollbackCache
+   * @description Hàm này dùng để rollback cache nếu script load không thành công
+   * Tránh xảy ra vấn đề khi script load không thành công
+   * Nhưng repack lại không rollback cache trong trường hợp này dẫn đến khi load phiên bản mới nhưng lỗi
+   * Thì ở js cache vẫn lưu metadata của phiên bản lỗi vào
+   * VD: Có cache 1.0.0, load phiên bản 1.0.1 thất bại
+   * => Phiên bản được lưu vào cache vẫn là 1.0.0 thay vì 1.0.1
+   */
+  async rollbackCache(
+    webpackContext: WebpackContext,
+    cacheKey: string,
+    scriptId: string,
+    error: unknown,
+    caller?: string
+  ) {
+    if (cacheKey) {
+      console.debug(cacheKey, 'FROM: ', this.cache[cacheKey]);
+      console.debug(cacheKey, 'ROLLBACK: ', this.memoCache[cacheKey]);
+      if (this.memoCache[cacheKey]?.query) {
+        this.cache[cacheKey] = this.memoCache[cacheKey];
+        await this.saveCache();
+      } else {
+        delete this.cache[cacheKey];
+        await this.saveCache();
+        throw error;
+      }
+
+      console.debug('RETRY', this.cache[cacheKey]);
+
+      let locator;
+      for (const [, resolve] of this.resolvers) {
+        locator = await resolve(scriptId, caller);
+        if (locator) {
+          break;
+        }
+      }
+      if (!locator) {
+        throw new Error(`No resolver was able to resolve script ${scriptId}`);
+      }
+      if (typeof locator.url === 'function') {
+        locator.url = locator.url(webpackContext);
+      }
+
+      // Convert query string to object
+      locator.query = this.parseQueryString(this.memoCache[cacheKey].query);
+
+      const newScript = Script.from(
+        {
+          scriptId,
+          caller,
+        },
+        locator,
+        false
+      );
+
+      await this.nativeScriptManager.loadScript(scriptId, newScript.locator);
+    }
   }
 
   /**

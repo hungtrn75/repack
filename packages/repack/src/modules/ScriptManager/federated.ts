@@ -248,11 +248,13 @@ export namespace Federated {
    *
    * const myUtil = await Federated.importModule('my-lib', './myUtil.js');
    * ```
+   * @param loadedFromCacheCallback là callback được gọi khi script được load từ cache
    */
   export async function importModule<Exports = any>(
     containerName: string,
     module: string,
-    scope: string = 'default'
+    scope: string = 'default',
+    loadedFromCacheCallback?: () => void
   ): Promise<Exports> {
     if (!__webpack_share_scopes__[scope]?.__isInitialized) {
       // Initializes the share scope.
@@ -264,9 +266,19 @@ export namespace Federated {
     // Do not use `const container = self[containerName];` here. Once container is loaded
     // `container` reference is not updated, so `container.__isInitialized`
     // will crash the application, because of reading property from `undefined`.
-    if (!self[containerName]) {
+
+    /**
+     * @var retryFlag là flag dùng để đánh dấu biết ràng script được load từ phiên bản cũ hay không
+     * nếu retryFlag = true thì sẽ clear cache container và load lại script vào lần sau
+     * VD: Phiên bản cache 1.0.0
+     * - Khi load phiên bản 1.0.1 nhưng bị failed và có cache cửa phiên bản 1.0.0 thì retryFlag = true
+     * - Sau đó sẽ clear cache container từ webpack để load lại script vào lần sau
+     * - Gọi hàm callback loadedFromCacheCallback để thông báo cho người dùng biết rằng script được load từ phiên bản cũ
+     */
+    let retryFlag = false;
+    if (self[containerName]?.__isInitialized !== true) {
       // Download and execute container
-      await ScriptManager.shared.loadScript(containerName);
+      retryFlag = await ScriptManager.shared.loadScript(containerName);
     }
 
     const container = self[containerName];
@@ -279,6 +291,39 @@ export namespace Federated {
 
     const factory = await container.get(module);
     const exports = factory();
+
+    if (retryFlag) {
+      console.debug('[Federated] Retry load container');
+
+      /**
+       * {@link loadedFromCacheCallback}
+       */
+      loadedFromCacheCallback?.();
+      clearCacheContainer(containerName);
+    } else {
+      /**
+       * Đặt lại cờ retry để biết là script đã được load từ phiên bản mới nhất
+       */
+      self[containerName].retryFlag = false;
+    }
+
     return exports;
+  }
+
+  export function clearCacheContainer(containerName: string): void {
+    if (self[containerName] === undefined) return;
+    console.debug('[Federated] Clear cache container');
+    /**
+     * @param retryFlag là cờ dùng để cho webpack biết là sau khi chunk load được data thì
+     * - Nếu retryFlag = true thì vẫn nạp vào webpack runtime nhưng không cache để chunk luôn load lại mới mỗi lần được gọi
+     * - Nếu retryFlag = false thì sẽ lưu lại cache vào @var installedChunkData của webpack {@link ModuleChunkLoadingRuntimeModule}
+     *
+     * @param cache là reference trỏ đến @var __webpack_module_cache__ dùng lưu lại cache của các chunk thuộc container
+     * Reference này sẽ được sử dụng để clear cache của container nếu nếu các chunks được load từ cache
+     * Việc clear cache này đảm bảo các container sẽ được load lại mỗi lần được gọi
+     */
+    self[containerName].__isInitialized = false;
+    self[containerName].retryFlag = true;
+    self[containerName].cache = {};
   }
 }
