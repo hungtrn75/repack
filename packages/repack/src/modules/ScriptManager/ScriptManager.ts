@@ -421,8 +421,9 @@ export class ScriptManager extends EventEmitter {
     caller?: string
   ) {
     if (cacheKey) {
-      console.debug(cacheKey, 'FROM: ', this.cache[cacheKey]);
-      console.debug(cacheKey, 'ROLLBACK: ', this.memoCache[cacheKey]);
+      console.debug(
+        `[ROLLBACK: ${this.cache[cacheKey]?.query ?? 'No cache'} => ${this.memoCache[cacheKey]?.query ?? 'No cache'}] ${cacheKey}`
+      );
       if (this.memoCache[cacheKey]?.query) {
         this.cache[cacheKey] = this.memoCache[cacheKey];
         await this.saveCache();
@@ -431,8 +432,6 @@ export class ScriptManager extends EventEmitter {
         await this.saveCache();
         throw error;
       }
-
-      console.debug('RETRY', this.cache[cacheKey]);
 
       let locator;
       for (const [, resolve] of this.resolvers) {
