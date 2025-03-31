@@ -134,8 +134,6 @@ export class ScriptManager extends EventEmitter {
     ) => {
       const [[scriptId, caller]] = data;
       this.emit('__loaded__', { scriptId, caller });
-      console.log('');
-
       return parentPush(...data);
     }).bind(
       null,
@@ -220,7 +218,6 @@ export class ScriptManager extends EventEmitter {
       const cacheEntry = await this.storage?.getItem(CACHE_KEY);
       this.cache = cacheEntry ? JSON.parse(cacheEntry) : {};
       this.cacheInitialized = true;
-      console.debug('initCache', JSON.stringify(this.cache));
     }
   }
 
