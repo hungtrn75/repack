@@ -29,8 +29,12 @@ module.exports = function () {
 
   // Copy all properties from the original function to the wrapped function
   Object.getOwnPropertyNames(originalWebpackRequire).forEach((key) => {
-    const descriptor = Object.getOwnPropertyDescriptor(originalWebpackRequire, key);
-    if (!descriptor || descriptor.writable) {  // Skip read-only properties
+    const descriptor = Object.getOwnPropertyDescriptor(
+      originalWebpackRequire,
+      key
+    );
+    if (!descriptor || descriptor.writable) {
+      // Skip read-only properties
       // @ts-ignore
       guardedWebpackRequire[key] = originalWebpackRequire[key];
     }
